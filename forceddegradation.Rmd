@@ -1,7 +1,7 @@
 ---
 title: "Terfenadine forced degradation data processing"
 author: "Youzhong"
-date: '2022-08-31'
+date: '2022-09-30'
 output: html_document
 ---
 
@@ -157,20 +157,127 @@ library_visualizer(lib_123_matrix, id = id_matched, query_spectrum = query_sp)
 
 params.query.sp = list(prec_mz = query_mz, use_prec = F, polarity = "Positive", method = "F1", min_frag_match = 6, min_score = 0, reaction_type = "Metabolic")
 
-search_result = library_query(input_library = lib_123_matrix, query_spectrum = query_sp, params.query.sp = params.query.sp)
+search_result = library_query(input_library = lib_123_matrix, query_spectrum = query_sp, params.query.sp =1 params.query.sp)
 
-ids_matched = search_result$consensus$metadata$ID
-scores_matched = search_result$consensus$metadata$SCORE_MERGEION
+# Check the top structure matches:
+
+head(search_result$consensus$metadata)
 
 # The top candidate is still Terfenadine based on InchiKey, the gives us extra structure confirmation:
 
-print(ids_matched[1])
+id_hit = search_result$consensus$metadata$ID[1]
+print(id_hit)
 
-# Other candidates found and their scoring
+# Top 4 candidates found:
 
-print(ids_matched[2:4])
-print(scores_matched[2:4])
+id_matched = search_result$consensus$metadata$ID[1:4]
+print(id_matched)
 
-# 
+# The candidate ranked 2nd and 4th are drug impurities without structure annotation. So let's plot the spectra and structure of 3rd candidate based on its smiles code, and compare with the expected drug API. The package RChemMass should be loaded for plotting the structures.
+
+remotes::install_github("schymane/RChemMass")
+library(RChemMass)
+
+smiles_matched = search_result$consensus$metadata$SMILES
+
+library_visualizer(lib_123_matrix, id = id_matched[3], add.legend = F)
+renderSMILES.rcdk(smiles_matched[3],kekulise=FALSE, coords = c(50, 60, 160, 100))
+
+library_visualizer(lib_123_matrix, id = id_matched[1], add.legend = F)
+renderSMILES.rcdk(smiles_matched[1], kekulise=FALSE, coords = c(50, 60, 160, 100))
+
+```
+
+
+We obversed a strong structure similarity between the analog search candidate 3 (upper plot) and the expected compound (lower plot):
+
+![](images/Search2.jpg)
+
+### Searching the entire forced deg feature set against _Drug+_ spectral library by exact match and analog search
+
+Now it is time to annotate everything against the spectral library, using Cosine as spectral similarity metrics. We start with exact match, which considers both precursor m/z match and spectral similarity.
+
+```{r search3, eval = FALSE}
+
+params.search = list(mz_search = 0.01, ppm_search = 10, rt_search = 0, rt_gap = 0)
+
+params.query.sp = list(prec_mz = 0, use_prec = T, polarity = "Positive", method = "Cosine", min_frag_match = 6, min_score = 0, reaction_type = "Metabolic")
+
+search_results = library_query(lib_123_matrix, query_library = library1, params.search = params.search, params.query.sp = params.query.sp)
+
+# Extract output table from search results:
+
+search_results = search_results$consensus$metadata
+search_results = search_results[search_results$ANNOTATION_EXACT!="0",]
+search_results = search_results[,c("ID","PEPMASS", "RT", "ANNOTATION_EXACT", "SCORE_EXACT")]
+
+print(search_results)
+
+# 5 detected LC-MS features were annotated as drug compounds or impurities by exact search. Time to visualize such spectral similarity via mirror plot:
+
+for (i in 1:5){
+  
+  query_id = search_results$ID[i]
+  query_sp = library_query(library1, query_id)$consensus$sp[[1]]
+  ref_id = search_results$ANNOTATION_EXACT[i]
+  
+  library_visualizer(lib_123_matrix, id = ref_id, query_spectrum = query_sp)
+}
+
+```
+
+"Terfenadine_89" was succussfully annotated as the expected parent compound _GUGOEEXESWIERI_ (Terfenadine). Interestingly, the query spectrum Terfenadine_22 (precursor mass is 219.174) was matched with the unknown impurity _CDOZDBSBBXSXLB_IMP_8_ (Impurity of Ethopropazine). That indicates that the same process impurity was found in both drug products.
+
+![](images/Search3.jpg)
+
+Alternatively, the entire forced deg feature set was searched against _Drug+_ spectral library by analog search. This process annotates all forced deg features against the spectral library only based on MS/MS spectral similarity. Therefore, we may find analog structures without precursor _m/z_ match. This process can take some time depending on the number of MS/MS scans to be searched and the size of the spectral library.
+
+```{r search4, eval = FALSE}
+
+params.search = list(mz_search = 0.01, ppm_search = 10, rt_search = 0, rt_gap = 0)
+
+params.query.sp = list(prec_mz = 0, use_prec = F, polarity = "Positive", method = "F1", min_frag_match = 6, min_score = 0.2, reaction_type = "Metabolic") # Minimum F1 score should be 0.2 to be considered as an analog match
+
+library1_annotated = library_query(lib_123_matrix, query_library = library1, params.search = params.search, params.query.sp = params.query.sp)
+
+# Extract output table from search results:
+
+search_results = library1_annotated$consensus$metadata
+search_results = search_results[search_results$ANNOTATION_ANALOGUE!="0",]
+search_results = search_results[,c("ID","PEPMASS", "RT", "ANNOTATION_ANALOGUE", "SCORE_ANALOGUE", "MDIFF_ANALOGUE")]
+
+print(search_results)
+
+# We can now extract features that are annotated to Terfenadine (ID = GUGOEEXESWIERI) by analog search. These features are probably drug degradant due to their high spectral similarity with the parent compound. 6 features were extracted in total:
+
+annotations = sapply(search_results$ANNOTATION_ANALOGUE, function(x) strsplit(x, ":")[[1]][1])
+
+print(search_results[which(annotations=="GUGOEEXESWIERI"),])
+
+
+```
+
+### Molecular networking of forced deg feature set
+
+The identity of the rest of detected features are still unknown, molecular networking unravels their underlying structural relatedness based on their mutual spectral similarity. Network can be generated using the _library_generator_ function, by setting up the network parameters. Please look at **params.network** in the function manual for network filters and parameters.
+
+```{r network, eval = FALSE}
+
+# same parameter sets as when we generate the spectral set:
+
+params.search = list(mz_search = 0.01, ppm_search = 10, rt_search = 0, rt_gap = 0)
+params.ms.preprocessing = list(normalized = TRUE, baseline = 25000, relative = 0, max_peaks = 200, recalibration = 0)
+params.consensus = list(consensus = TRUE, consensus_method = "consensus", consensus_window = 0.01)
+
+# Add network parameters: similarity metrics, minumum fragment matches and similarities 
+# Add network filters: topK, max_comp_size
+# Add network edge annotation parameters: reaction_type (annotating chemical reaction based on mass difference) and use_reaction
+
+params.network = list(network = TRUE, similarity_method = "F1",min_frag_match = 10, min_score = 0.2, topK = 5, max_comp_size = 0, reaction_type = "Chemical", use_reaction = F)
+
+library1_network = library_generator(input_library = library1_annotated, lcms_files = NULL,
+  metadata_file = NULL, polarity = "Positive", mslevel = 2, add.adduct = FALSE, processing.algorithm =  "Default",
+  params.search = params.search, params.ms.preprocessing = params.ms.preprocessing, params.consensus = params.consensus,
+  params.network = params.network)
 
 ```
