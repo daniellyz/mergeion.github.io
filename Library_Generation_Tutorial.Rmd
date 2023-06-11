@@ -1,0 +1,160 @@
+---
+title: "Building spectral library from a mixture of chemical standards"
+author: "Youzhong/Manuela"
+date: '2023-01-02'
+output: html_document
+---
+
+```{r setup, include=F}
+knitr::opts_chunk$set(echo = T)
+```
+
+### Introduction
+
+This vignette describes how to generate a spectral library with chromatographic (retention time) and MS/MS information.LC-MS/MS files and metadata for library generation be downloaded at: https://zenodo.org/record/7506099#.Y7bJKXbMJaQ
+
+The test dataset was provided by Janssen Pharmaceutica. The name, formula, SMILES and precursor mass/charge (PEPMASS) of the test compounds can be found in the metadata (Metadata_Library.txt). Data were acquired in positive ion mode (ESI-POS) using either data-dependent acquisition (DDA) or targeted MS/MS. Raw files in profile mode were converted into centroid mode mzML or mzXML files using MSConvertGUI (https://proteowizard.sourceforge.io/). Please also refer to following websites for more details about conversion of vendor raw data to mz(x)ML format: https://ccms-ucsd.github.io/GNPSDocumentation/fileconversion/.
+
+
+### Before starting
+
+1. Create a folder and download the converted files (mzML or mzXML) and the metadata (Metadata_Library.txt). Make sure the metadata should contain at least the ID (a unique identifier) and PEPMASS (precursor mass) of compounds you would like to extract spectral records for in order to be included in the spectral library. FILENAME (in which experiment you expect the compound to occur) and RT (retention time) are recommended.
+2. Create a new R script and set the working directory.
+3. Load MergeION package
+
+```{r}
+library(MergeION)
+```
+
+### Building the first spectral library 
+
+We can now start building a spectral library from 4 reference standard mixtures (one file per mixture). We know in total there are 36 compounds in these mixtures: 
+
+```{r}
+input_library = NULL #A brand-new spectral database will be created
+
+#Check if the data files are in the working directory
+
+list.files(pattern = ".mzXML")
+list.files(pattern = ".mzML")
+
+#Read the files
+
+lcms_files = c("Mixture_36_POS.mzXML", 
+               "Compound_1_POS.mzML",
+               "Compound_2_POS.mzML",
+               "Compound_3_POS.mzML")
+
+#Read the metadata
+metadata_file = "Metadata_Library.txt"
+
+#Select the processing parameters as default
+processing.algorithm = "Default"
+
+# These parameters should reflect the mass accuracy of the instrument and the retention time deviation for the chromatographic system. 
+params.search = list(mz_search = 0.01, ppm_search = 10, rt_search = 10, rt_gap = 30) # Units in Da, ppm, sec and sec
+
+#  All MS/MS scans extracted are normalized to the highest peak, only top 200 most intense peaks are kept. An intensity baseline of 25000 was applied - here it reflects the noise level of Orbitrap instruments
+params.ms.preprocessing = list(normalized = TRUE, baseline = 25000, relative = 0, max_peaks = 200, recalibration = 0)
+
+# MS/MS scans of the same MS1 feature were extracted from different files,they are now combined to generate an fragment-rich consensus spectrum. Setting "consensus_method = consensus" kept fragments detected in all spectral records. A consensus window is applied to merge product ions with similar m/z values. 
+params.consensus = list(consensus = TRUE, consensus_method = "consensus", consensus_window = 0.01)
+
+# We can now run target feature search and consensus spectrum generation:
+
+Library_POS  = library_generator(input_library, lcms_files, metadata_file,
+polarity = "Positive", mslevel = c(1,2), add.adduct = FALSE,
+processing.algorithm = processing.algorithm, params.search = params.search,     params.ms.preprocessing = params.ms.preprocessing, params.consensus = params.consensus)
+
+```
+
+> This mensage should be ignored: Error in x$.self$finalize() : attempt to apply non-function
+
+```{r}
+# This function generates a report from the created library
+library_reporter(Library_POS)
+
+# Writing the library
+#The complete or consensus library can be exported as open source formats like msp or mgf
+library_writer(Library_POS, con= "output_Library_POS.mgf", type="complete")
+
+```
+
+### Merging with a public library
+
+If you download other open source libraries from MassBank or GNPS, they can be merged with your local one. We have pre-compiled a combine MassBank and GNPS at: https://zenodo.org/record/7057435#.Y7atSnbMI2w. Please download the "GNPS_MASSBANK_PROCESSED_POS_CONSENSUS1.RData" file and put in the same working directory as the mgf/msp file:
+
+```{r}
+
+load("GNPS_MASSBANK_PROCESSED_POS_CONSENSUS1.RData")
+
+# Merging library with public ones:
+
+Combined_Lib = library_combiner(library1c, Library_POS)
+
+# Alternatively, you could merge the two files directly:
+
+#Combined_Lib = library_combiner("GNPS_MASSBANK_PROCESSED_POS_CONSENSUS1.RData",  "output_Library_POS.mgf")
+
+```
+
+Let's check now how many compounds in public library and in the updated one. 
+
+```{r}
+
+library_reporter(library1c) # 11642 compounds in library$complete
+library_reporter(Combined_Lib) # 11667 compounds in library$complete
+
+```
+
+We have added 25 new compounds into the public library! That's not exciting? Now we can convert the combined library to mgf format and export to your working directory: 
+
+```{r}
+
+library_writer(Combined_Lib, "Combined_Lib.mgf")
+
+```
+
+### Building the library with RMassBank algorithm
+ 
+We have included the RMassBank algorithm for library building (https://www.bioconductor.org/packages/release/bioc/html/RMassBank.html). You only need to change 1-2 parameters in library_generator function:
+
+```{r}
+
+#See example below:
+input_library = NULL #A brand-new spectral database will be created
+
+#Change the processing algorithm to RMassBank
+processing.algorithm = "RMassBank"
+
+#Recalibration = 1 to show the output as the experimental mass along with annotated formula.
+params.ms.preprocessing = list(normalized = TRUE, baseline = 25000, relative = 0, max_peaks = 200, recalibration = 1)
+
+# Library generation
+Library_POS_RMassBank  = library_generator(input_library, lcms_files, metadata_file,
+          polarity = "Positive", mslevel = c(1,2), add.adduct = FALSE, 
+          processing.algorithm = processing.algorithm, 
+          params.search = params.search, 
+          params.ms.preprocessing = params.ms.preprocessing, 
+          params.consensus = params.consensus)
+
+```
+
+Let's check how many compounds in RMassBank processed library, it should be very similar to the library by Default algorithm:
+
+```{r}
+library_reporter(Library_POS_RMassBank) 
+library_reporter(Library_POS)
+```
+
+You could now display the elemental formula of product ions annotated by RMassBank:
+
+```{r}
+
+# Metadata of the compound:
+print(Library_POS_RMassBank$complete$metadata[5,]) 
+
+# Its MS/MS spectra with elemental formula annotation by RMassBank:
+print(Library_POS_RMassBank$complete$sp[[5]])
+```
+# The end
