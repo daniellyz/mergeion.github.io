@@ -1,0 +1,174 @@
+---
+title: "Urinary drug metabolite screening"
+author: "Youzhong"
+date: '2022-08-31'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+### Testing data availability
+
+LC-MS/MS data for drug metabolite screening can be found at: 
+https://www.ebi.ac.uk/metabolights/MTBLS307/files
+
+MS features found in these data by MZMine can be downloaded as:
+https://github.com/daniellyz/MESSAR/blob/master/MESSAR_WEBSERVER_DEMO/molecular_feature.csv?raw=true
+
+The pharmaceutical spectral database _Drug+_ for spectra matching and unknown annotation can be found at:
+https://zenodo.org/record/7019893#.Yws1dHZBw2w
+
+### Background of the dataset
+
+Data files were acquired by Justin V.H et al.(2016). The study was designed to apply molecular networking to seek drugs and their metabolites, in MS/MS spectra from urine derived from a cohort of patients on antihypertensive therapy. The original study led to untargeted identification of drugs and their metabolites at the population level and has great potential to contribute to understanding stratified responses to drugs where differences in drug metabolism may determine treatment outcome. We would like to test the compound annotation (by searching _Drug+_) and molecular networking functionalities in MergeION. We expect to obtain similar interpretation results using the pipeline fully written in MergeION.
+
+### Input LC-MS/MS data description
+
+We can directly download the converted mzXML files from author's website. To save  time in this tutorial, we only downloaded and processed three files:
+
+```{r download1, eval = FALSE}
+
+download.file("https://www.ebi.ac.uk/metabolights/ws/studies/MTBLS307/download/0564fc7c-80fe-4f1e-a7fd-e228be547d0a?file=Urine_05_Top10_POS.mzXML", "Urine_05_Top10_POS.mzXML")
+download.file("https://www.ebi.ac.uk/metabolights/ws/studies/MTBLS307/download/0564fc7c-80fe-4f1e-a7fd-e228be547d0a?file=Urine_19_Top10_POS.mzXML", "Urine_19_Top10_POS.mzXML")
+download.file("https://www.ebi.ac.uk/metabolights/ws/studies/MTBLS307/download/0564fc7c-80fe-4f1e-a7fd-e228be547d0a?file=Urine_37_Top10_POS.mzXML", "Urine_37_Top10_POS.mzXML")
+
+```
+
+### Metadata description
+
+Metadata table should contain target features labeled by a unique identifier. Here we include MS1 features detected in all urine samples. Please download the metadata table and put it into the same R workspace. The we used the function _process_mzmine_ to group adducts and features corresponding to halogen isotopes (extra filtering steps for the MZMine 2 output)
+
+```{r download2, eval = FALSE}
+
+download.file("https://github.com/daniellyz/MESSAR/blob/master/MESSAR_WEBSERVER_DEMO/molecular_feature.csv?raw=true", "molecular_feature.csv")
+
+metadata = process_mzmine("molecular_feature.csv", polarity = "Positive", combine.adduct = T, remove.minor.coelution  = F, remove.halogene = T, rt_search = 0.15, mz_search = 0.01)
+
+write.table(metadata, "molecular_feature_filtered.csv", col.names = T, row.names = F, sep =",", quote = F)
+
+```
+
+![](images/Urine metadata.jpg)
+
+### Load MergeION
+
+```{r load1, eval = FALSE}
+
+library(MergeION)
+
+```
+
+### Target feature search in meRgeION
+
+To extract MS/MS scan for each MS1 feature, meRgeION uses mass and retention time in the input metadata table. Target feature search requires initial library (**input_library**), input MS/MS file names (**lcms_files**), input metadata file name (**metadata_file**), polarity, extracted scan type (**mslevel**, here only MS2 since the goal is molecular networking only), additional adducts (**add.adduct**, extracting additional adducts or not), processing algorithm, _m/z_ and RT matching parameters (**params.search**), post-processing parameters for extracted scans (**params.ms.preprocessing**), and consensus scan generation parameters (**params.consensus**, combining scans of the same MS1 feature extracted from different files into a single consensus scan). Here we test two different algorithms for target feature search: *Default* and *compMS2Miner*. The second algorithm is faster and includes a dynamic noise subtraction step. However, there's a risk that MS/MS scans of some MS1 features are not picked up by the algorithm.
+
+```{r target, eval = FALSE}
+
+help(library_generators) # More details about the parameters
+
+input_library = NULL # We create a brand-new spectral database for this study
+lcms_files = list.files(pattern = ".mzXML") # Make sure only the 3 mzXML files of urinary metabolomics are in the working directory
+metadata_file = "molecular_feature_filtered.csv"
+
+# These parameters should reflect the mass and retention time deviation 
+params.search = list(mz_search = 0.01, ppm_search = 10, rt_search = 10, rt_gap = 30)
+
+#  All MS/MS scans extracted are normalized to the highest peak, only top 200 most intense peaks were kept. An intensity baseline of 25000 was applied - here it reflects the noise level of Orbitrap instruments
+params.ms.preprocessing = list(normalized = TRUE, baseline = 25000, relative = 0, max_peaks = 200, recalibration = 0)
+
+# MS/MS scans of the same MS1 feature were extracted from different files,they are now combined to generate an fragment-rich consensus spectrum. Setting "consensus_method = consensus" kept fragments detected in all spectral records. A consensus window is applied to merge product ions with similar m/z values. 
+params.consensus = list(consensus = TRUE, consensus_method = "consensus", consensus_window = 0.01)
+
+# We first run target feature search and consensus spectrum generation with Default algorithm:
+
+processing.algorithm = "Default"
+library1d = library_generator(input_library, lcms_files, metadata_file,
+polarity = "Positive", mslevel = 2, add.adduct = FALSE, processing.algorithm = processing.algorithm, params.search = params.search, params.ms.preprocessing = params.ms.preprocessing, params.consensus = params.consensus)
+
+# For comparison, we run the same steps with compMS2Miner algorithm:
+
+processing.algorithm = "compMS2Miner"
+library1c = library_generator(input_library, lcms_files, metadata_file,
+polarity = "Positive", mslevel = 2, add.adduct = FALSE, processing.algorithm = processing.algorithm, params.search = params.search, params.ms.preprocessing = params.ms.preprocessing, params.consensus = params.consensus)
+
+```
+
+### Library summary and lookup
+
+The output is a list of three elements: *complete*, *consensus* and *network*. At this stage, only *complete* (scans extracted from 3 DDA files) and *consensus* (one consensus spectrum per input feature) were generated. It is possible to create a summary of the spectral collection. We compare here the spectral collection extracted using *Default* and *compMS2Miner*.
+
+```{r report2, eval = FALSE}
+library_reporter(library1d)
+library_reporter(library1c)
+```
+
+As expected, the spectral collection *Default* contains many more input features than *compMS2Miner*. That is because of the extra filtering steps with *compM2Miner* algorithm. 
+
+![](images/Urine library.jpg)
+
+### Molecular networking 
+
+We want now to build a complex molecular network using MS/MS spectra of all detected features (metabolites) in urine samples. Although the identity of detected features are still unknown, molecular networking unravels their underlying structural relatedness based on their mutual spectral similarity.
+
+```{r nn1, eval = FALSE}
+
+# Add network parameters: similarity metrics (here set as consine), minimum fragment matches and similarities 
+# Add network filters: topK, max_comp_size
+# Add network edge annotation parameters: reaction_type (annotating metabolic reaction based on mass difference) and use_reaction
+
+params.network = list(network = T, similarity_method = "Cosine", min_frag_match = 10, min_score = 0.05, topK = 10, max_comp_size = 30, reaction_type = "Metabolic", use_reaction = FALSE)
+
+# First molecular network is based on the "smaller" library1c generated by compM2Miner
+
+library1cn = library_generator(library1c, lcms_files = NULL, metadata_file = NULL, polarity = "Positive", mslevel = 2, add.adduct = F, processing.algorithm = processing.algorithm, params.search = params.search, params.ms.preprocessing = params.ms.preprocessing, params.consensus = params.consensus, params.network = params.network)
+
+# Second molecular network is based on the library1d generated by SmartION algorithm. This step can take from 30 min to 1 hour depending on the RAM of your PC.
+
+library1dn = library_generator(library1d, lcms_files = NULL, metadata_file = NULL, polarity = "Positive", mslevel = 2, add.adduct = F, processing.algorithm = processing.algorithm, params.search = params.search, params.ms.preprocessing = params.ms.preprocessing, params.consensus = params.consensus, params.network = params.network)
+
+```
+
+### Searching the entire forced deg feature set against _Drug+_ spectral library by exact match and analog search
+
+To annotate the extracted MS/MS scans in the uirinary metabolomics study, we search them against _Drug+_, a pharmaceutical MS/MS spectral library built by our team, currently available in ESI+ mode only:
+
+```{r db2, eval = FALSE}
+
+download.file("https://zenodo.org/record/7057435/files/lib_drug_plus_matrix.RData?download=1", "lib_drug_plus_matrix.RData") # Download Drug+ as a library object
+load("lib_drug_plus_matrix.RData") # Load Drug+ as object lib_123_matrix into R environment
+
+```
+
+Now it is time to annotate all collected spectra against the spectral library, using Cosine as spectral similarity metrics. Wen perform here exact match, which considers both precursor *m/z* match and spectral similarity. 
+
+```{r search1, eval = FALSE}
+
+params.search = list(mz_search = 0.01, ppm_search = 10, rt_search = 15, rt_gap = 30)
+params.query.sp = list(prec_mz = 0, use_prec = T, polarity = "Positive", method = "F1", min_frag_match = 6, min_score = 0, reaction_type = "Metabolic")
+library1dn_annotated = library_query(input_library = lib_123_matrix, query_ids = NULL, query_expression = "", query_spectrum = NULL, query_library = library1dn, params.search = params.search, params.query.sp = params.query.sp)
+
+```
+### Molecular network visualization
+
+To visualize the molecular network, we can use the external software Cytoscape (http://www.cytoscape.org/download.php.Complete installation wizard). **Launch Cytoscape**. After installing and launching Cytoscape, the *RCy3* package is recommended to visualize the MergeION output directly in Cytosape. To install Rcy3 and connect with Cytoscape:
+
+```{r network1, eval = FALSE}
+BiocManager::install("RCy3")
+library(RCy3)
+cytoscapePing()
+
+```
+
+Once you see "You are connected to Cytoscape!", let's extract the network object from MergeION output *library1dn_annotated* and visualize it in Cytoscape! We recall that the nodes of the network correspond to detected LC-MS features in urinary samples, and the edges represent their MS/MS spectral relatedness, often translated to their structural similarity. The nodes contain all metadata of LC-MS features, including structure annotation performed in the previous step.
+
+```{r network2, eval = FALSE}
+
+ig = library1dn_annotated$network$ig
+createNetworkFromIgraph(ig,"Urinary_network")
+
+```
+![](images/Network 2.jpg)
+
+The network appeared in Cytoscape is called "Urinary_network". Please also have a look at the nice tutorial about the customization of molecular network display on the GNPS website: https://ccms-ucsd.github.io/GNPSDocumentation/cytoscape/. 
+
