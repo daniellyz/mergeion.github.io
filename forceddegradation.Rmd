@@ -1,0 +1,305 @@
+---
+title: "Terfenadine forced degradation data processing"
+author: "Youzhong"
+date: '2022-09-30'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+### Testing data availability
+
+LC-MS/MS data and metadata of Terfenadine can be found at: https://zenodo.org/record/7018370#.YwscL3ZBw2w. 
+
+The pharmaceutical spectral database _Drug+_ for spectra matching and unknown annotation can be found at:
+https://zenodo.org/record/7057435#.Y0agjnZBxaQ
+
+### Background of the dataset
+
+Terfenadine is subjected to acid hydrolysis and oxidative stress against a baseline condition. The goal here is to profile and identify various degradation products of Terfenadine by setting stress conditions more severe than recommended storage, in order to further understand the underlying chemical mechanisms. 
+Non-targeted profiling in DDA mode was conducted for samples at Day 0 (1 sample) and Day 7 (3 samples for 3 conditions) on an Orbitrap Fusion Lumos. Converted data files were submitted to MZMine for feature detection. Next, features representing different ion species of the same potential compound were put into a single feature. Fold change of each feature under different conditions was calculated. We then built a LC-MS/MS data processing pipeline in meRgeION that enables degradation product annotation by searching _Drug+_ and mechanism understanding through FBMN. 
+
+### Input LC-MS/MS data description
+
+DDA-mode data acquired on Orbitrap Fusion Lumos (.raw format) were converted to mzXML files using the software described at: https://ccms-ucsd.github.io/GNPSDocumentation/fileconversion/. Four files converted were Day 0, Day 7 control, Day 7 acidic, and Day 7 oxidative stress samples, respectively. Converted files were directly available for download:
+
+```{r download1, eval = FALSE}
+
+download.file("https://zenodo.org/record/7018370/files/FD_terfenadine_190218_MAS011_02.mzXML?download=1", "FD_terfenadine_190218_MAS011_02.mzXML")
+download.file("https://zenodo.org/record/7018370/files/FD_terfenadine_190218_MAS011_03.mzXML?download=1", "FD_terfenadine_190218_MAS011_03.mzXML")
+download.file("https://zenodo.org/record/7018370/files/FD_terfenadine_190218_MAS011_04.mzXML?download=1", "FD_terfenadine_190218_MAS011_04.mzXML")
+download.file("https://zenodo.org/record/7018370/files/FD_terfenadine_190218_MAS011_05.mzXML?download=1", "FD_terfenadine_190218_MAS011_05.mzXML")
+
+```
+
+### Metadata description
+
+Metadata table should contain target features labeled by a unique identifier. Here we include all MS1 features detected by MZMine and reduced by the meRgeION _process_mzmine_ function. Fold change and relative quantification were calculated and included into the metadata table. Please download the metadata table prepared and put into the same R workspace:
+
+```{r download2, eval = FALSE}
+download.file("https://zenodo.org/record/7018370/files/molecular%20feature%20annotated%20terfenadine.csv?download=1", "molecular feature annotated.csv")
+```
+
+![](images/Forced deg metadata.jpg)
+
+### Load MergeION
+
+```{r load1, eval = FALSE}
+library(MergeION)
+
+```
+
+### Target feature search in meRgeION
+
+To extract MS/MS scan for each MS1 feature, meRgeION uses mass and retention time in the input metadata table. Here the Default smartION algorithm is used. Target feature search requires initial library (**input_library**, optional if the goal is to append new data into an existing database), input MS/MS file names (**lcms_files**), input metadata file name (**metadata_file**), polarity, extracted scan type (**mslevel**, MS1, MS2 or both), additional adducts (**add.adduct**, extracting additional adducts or not), processing algorithm, _m/z_ and RT matching parameters (**params.search**), post-processing parameters for extracted scans (**params.ms.preprocessing**), and consensus scan generation parameters (**params.consensus**, combining scans of the same MS1 feature extracted from different files into a single consensus scan).
+
+```{r target, eval = FALSE}
+
+help(library_generators) # More details about the parameters
+
+input_library = NULL # We create a brand-new spectral database for this study
+lcms_files = list.files(pattern = ".mzXML") # Make sure only the 4 mzXML files of Terfenadine are in the working directory
+
+metadata_file = "molecular feature annotated.csv"
+processing.algorithm = "Default"
+
+# These parameters should reflect the mass and retention time deviation 
+params.search = list(mz_search = 0.01, ppm_search = 10, rt_search = 10, rt_gap = 30)
+
+#  All MS/MS scans extracted are normalized to the highest peak, only top 200 most intense peaks were kept. An intensity baseline of 25000 was applied - here it reflects the noise level of Orbitrap instruments
+params.ms.preprocessing = list(normalized = TRUE, baseline = 25000, relative = 0, max_peaks = 200, recalibration = 0)
+
+# MS/MS scans of the same MS1 feature were extracted from different files,they are now combined to generate an fragment-rich consensus spectrum. Setting "consensus_method = consensus" kept fragments detected in all spectral records. A consensus window is applied to merge product ions with similar m/z values. 
+params.consensus = list(consensus = TRUE, consensus_method = "consensus", consensus_window = 0.01)
+
+# We could now run target feature search and consensus spectrum generation:
+
+library1 = library_generator(input_library, lcms_files, metadata_file, polarity = "Positive", mslevel = 2, add.adduct = FALSE, processing.algorithm = processing.algorithm, params.search = params.search, params.ms.preprocessing = params.ms.preprocessing, params.consensus = params.consensus)
+
+```
+
+### Library summary and lookup
+
+The output **library1** is a list of three elements: *complete*, *consensus* and *network*. At this stage, only *complete* (scans extracted from all 4 DDA files) and *consensus* (one consensus spectrum per input feature) were generated. It is possible to create a summary of the spectral collection:
+
+```{r report1, eval = FALSE}
+library_reporter(library1)
+```
+
+![](images/report1.jpg)
+
+It is possible to look up the spectral database based on a vector of feature IDs or query conditions. The syntax of each query expression must be **condition = value**, while **condition** must match with column name of the input metadata. Spectral records extracted must fit all query conditions provided by user. The output is a filtered library containing both *complete* and *consensus*.
+
+```{r lookup, eval = FALSE}
+
+# Extracting spectral records of parent compound based on its ID (if known by user)
+
+query_result = library_query(input_library = library1, query_ids = "Terfenadine_89")
+
+# Extracting spectral records of parent compound based on its precursor mass (PEPMASS) and retention time (RT) 
+
+params.search$mz_search = 0.02
+
+query_result = library_query(input_library = library1, query_expression = c("PEPMASS = 472.3202", "RT = 9.4"), params.search = params.search)
+
+# Print results:
+
+library_reporter(query_result) 
+
+print(query_result$complete$metadata) # In total 4 scans of the parent compounds are extracted
+
+print(query_result$consensus$metadata) # 1 consensus scan was found for the parent compound
+
+# Extracting spectral records of feature for which M+H, M+Na and M+K adducts are detected
+
+query_result = library_query(input_library = library1, query_expression = "ADDUCT_TYPE = M+H:M+Na:M+K")
+
+library_reporter(query_result) # 4 features are detected with M+H, M+Na and M+K adducts
+
+print(query_result$consensus$metadata$ID) # including Terfenadine_89 - the parent drug
+
+```
+
+### Searching against an existing spectral library
+
+To annotate the extracted MS/MS scans in the forced degradation study, we search them against _Drug+_, a pharmaceutical MS/MS spectral library built by our team, currently available in ESI+ mode only:
+
+```{r db1, eval = FALSE}
+download.file("https://zenodo.org/record/7057435/files/GNPS_MASSBANK_PROCESSED_POS_CONSENSUS1.RData?download=1", "lib_drug_plus_matrix.RData") # Download Drug+ as a library object
+load("lib_drug_plus_matrix.RData") # Load Drug+ as object lib_123_matrix into R environment
+```
+
+We first search the consensus MS/MS spectrum of the parent drug against _Drug+_
+
+```{r search1, eval = FALSE}
+
+# Extracting spectral records of parent compound based on RT and mass:
+
+query_result = library_query(input_library = library1, query_expression = c("PEPMASS = 472.3202", "RT = 9.4"))
+query_sp = query_result$consensus$sp[[1]] # Query_sp is a two-column matrix m/z, intensity of the parent compound consensus spectrum
+query_mz = 472.3202 # Precursor mass of Terfenadine
+
+# Setting up spectral library search parameters, first EXACT search:
+
+params.query.sp = list(prec_mz = query_mz, use_prec = T, polarity = "Positive", method = "Cosine", min_frag_match = 6, min_score = 0, reaction_type = "Metabolic")
+
+search_result = library_query(input_library = lib_123_matrix, query_spectrum = query_sp, params.query.sp = params.query.sp)
+id_matched = search_result$consensus$metadata$ID[1]
+
+library_visualizer(lib_123_matrix, id = id_matched, query_spectrum = query_sp)
+
+```
+
+![](images/Search1.jpg)
+```{r search2, eval = FALSE}
+
+# We now test analog search (by setting use_prec = F), this time using F1 as spectral similarity metrics. The goal is to find compounds with similar structures but different masses.
+
+params.query.sp = list(prec_mz = query_mz, use_prec = F, polarity = "Positive", method = "F1", min_frag_match = 6, min_score = 0, reaction_type = "Metabolic")
+
+search_result = library_query(input_library = lib_123_matrix, query_spectrum = query_sp, params.query.sp =1 params.query.sp)
+
+# Check the top structure matches:
+
+head(search_result$consensus$metadata)
+
+# The top candidate is still Terfenadine based on InchiKey, the gives us extra structure confirmation:
+
+id_hit = search_result$consensus$metadata$ID[1]
+print(id_hit)
+
+# Top 4 candidates found:
+
+id_matched = search_result$consensus$metadata$ID[1:4]
+print(id_matched)
+
+# The candidate ranked 2nd and 4th are drug impurities without structure annotation. So let's plot the spectra and structure of 3rd candidate based on its smiles code, and compare with the expected drug API. The package RChemMass should be loaded for plotting the structures.
+
+remotes::install_github("schymane/RChemMass")
+library(RChemMass)
+
+smiles_matched = search_result$consensus$metadata$SMILES
+
+library_visualizer(lib_123_matrix, id = id_matched[3], add.legend = F)
+renderSMILES.rcdk(smiles_matched[3],kekulise=FALSE, coords = c(50, 60, 160, 100))
+
+library_visualizer(lib_123_matrix, id = id_matched[1], add.legend = F)
+renderSMILES.rcdk(smiles_matched[1], kekulise=FALSE, coords = c(50, 60, 160, 100))
+
+```
+
+
+We obversed a strong structure similarity between the analog search candidate 3 (upper plot) and the expected compound (lower plot):
+
+![](images/Search2.jpg)
+
+### Searching the entire forced deg feature set against _Drug+_ spectral library by exact match and analog search
+
+Now it is time to annotate everything against the spectral library, using Cosine as spectral similarity metrics. We start with exact match, which considers both precursor m/z match and spectral similarity.
+
+```{r search3, eval = FALSE}
+
+params.search = list(mz_search = 0.01, ppm_search = 10, rt_search = 0, rt_gap = 0)
+
+params.query.sp = list(prec_mz = 0, use_prec = T, polarity = "Positive", method = "Cosine", min_frag_match = 6, min_score = 0, reaction_type = "Metabolic")
+
+search_results = library_query(lib_123_matrix, query_library = library1, params.search = params.search, params.query.sp = params.query.sp)
+
+# Extract output table from search results:
+
+search_results = search_results$consensus$metadata
+search_results = search_results[search_results$ANNOTATION_EXACT!="0",]
+search_results = search_results[,c("ID","PEPMASS", "RT", "ANNOTATION_EXACT", "SCORE_EXACT")]
+
+print(search_results)
+
+# 5 detected LC-MS features were annotated as drug compounds or impurities by exact search. Time to visualize such spectral similarity via mirror plot:
+
+for (i in 1:5){
+  
+  query_id = search_results$ID[i]
+  query_sp = library_query(library1, query_id)$consensus$sp[[1]]
+  ref_id = search_results$ANNOTATION_EXACT[i]
+  
+  library_visualizer(lib_123_matrix, id = ref_id, query_spectrum = query_sp)
+}
+
+```
+
+"Terfenadine_89" was succussfully annotated as the expected parent compound _GUGOEEXESWIERI_ (Terfenadine). Interestingly, the query spectrum Terfenadine_22 (precursor mass is 219.174) was matched with the unknown impurity _CDOZDBSBBXSXLB_IMP_8_ (Impurity of Ethopropazine). That indicates that the same process impurity was found in both drug products.
+
+![](images/Search3.jpg)
+
+Alternatively, the entire forced deg feature set was searched against _Drug+_ spectral library by analog search. This process annotates all forced deg features against the spectral library only based on MS/MS spectral similarity. Therefore, we may find analog structures without precursor _m/z_ match. This process can take some time depending on the number of MS/MS scans to be searched and the size of the spectral library.
+
+```{r search4, eval = FALSE}
+
+params.search = list(mz_search = 0.01, ppm_search = 10, rt_search = 0, rt_gap = 0)
+
+params.query.sp = list(prec_mz = 0, use_prec = F, polarity = "Positive", method = "F1", min_frag_match = 6, min_score = 0.2, reaction_type = "Metabolic") # Minimum F1 score should be 0.2 to be considered as an analog match
+
+library1_annotated = library_query(lib_123_matrix, query_library = library1, params.search = params.search, params.query.sp = params.query.sp)
+
+# Extract output table from search results:
+
+search_results = library1_annotated$consensus$metadata
+search_results = search_results[search_results$ANNOTATION_ANALOGUE!="0",]
+search_results = search_results[,c("ID","PEPMASS", "RT", "ANNOTATION_ANALOGUE", "SCORE_ANALOGUE", "MDIFF_ANALOGUE")]
+
+print(search_results)
+
+# We can now extract features that are annotated to Terfenadine (ID = GUGOEEXESWIERI) by analog search. These features are probably drug degradant due to their high spectral similarity with the parent compound. 6 features were extracted in total:
+
+annotations = sapply(search_results$ANNOTATION_ANALOGUE, function(x) strsplit(x, ":")[[1]][1])
+
+print(search_results[which(annotations=="GUGOEEXESWIERI"),])
+
+
+```
+
+### Molecular networking of forced deg feature set
+
+The identity of the rest of detected features are still unknown, molecular networking unravels their underlying structural relatedness based on their mutual spectral similarity. Network can be generated using the _library_generator_ function, by setting up the network parameters. Please look at **params.network** in the function manual for network filters and parameters.
+
+```{r network, eval = FALSE}
+
+# same parameter sets as when we generate the spectral set:
+
+params.search = list(mz_search = 0.01, ppm_search = 10, rt_search = 0, rt_gap = 0)
+params.ms.preprocessing = list(normalized = TRUE, baseline = 25000, relative = 0, max_peaks = 200, recalibration = 0)
+params.consensus = list(consensus = TRUE, consensus_method = "consensus", consensus_window = 0.01)
+
+# Add network parameters: similarity metrics, minumum fragment matches and similarities 
+# Add network filters: topK, max_comp_size
+# Add network edge annotation parameters: reaction_type (annotating chemical reaction based on mass difference) and use_reaction
+
+params.network = list(network = TRUE, similarity_method = "F1",min_frag_match = 10, min_score = 0.2, topK = 5, max_comp_size = 0, reaction_type = "Chemical", use_reaction = F)
+
+library1_network = library_generator(input_library = library1_annotated, lcms_files = NULL,
+  metadata_file = NULL, polarity = "Positive", mslevel = 2, add.adduct = FALSE, processing.algorithm =  "Default", params.search = params.search, params.ms.preprocessing = params.ms.preprocessing, params.consensus = params.consensus,
+  params.network = params.network)
+
+```
+### Network visualization
+
+We recommend Cytoscape as network visualizer for molecular networks generated by MergeION.  Please download the latest Cytoscape from http://www.cytoscape.org/download.php.Complete installation wizard. **Launch Cytoscape**. After installing and launching Cytoscape, the *RCy3* package is recommended to visualize the MergeION output directly in Cytosape. To install Rcy3 and connect with Cytoscape:
+
+```{r network1, eval = FALSE}
+BiocManager::install("RCy3")
+library(RCy3)
+cytoscapePing()
+
+```
+
+Once "You are connected to Cytoscape!" message is displayed, let's extract the network object from MergeION output *library1_network* and visualize it in Cytoscape!
+
+```{r network2, eval = FALSE}
+ig = library1_network$network$ig
+createNetworkFromIgraph(ig,"Terfenadine_network")
+
+```
+
+A network named "Terfenadine_network" should be displayed now in the Cytoscape software using the default layout. The network display can be easily modified and improved. For instance, we could change the visualization style, the labels of nodes and edges, highlighting the nodes that were annotated as Terfenadine by analog search, and coloring the nodes based on fold change. Please have a look at the nice tutorial about the customization of molecular network display on the GNPS website: https://ccms-ucsd.github.io/GNPSDocumentation/cytoscape/. 
+
+![](images/Network 1.jpg)
